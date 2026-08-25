@@ -6,6 +6,112 @@ HOST = '0.0.0.0'
 PORT = 8080
 ROOT = os.getcwd()
 
+# ===== Tic Tac Toe (via luna-send alert chain) =====
+
+TICTACTOE_STATE = {'board': [' '] * 9, 'turn': 'X'}
+
+WIN_LINES = [
+    (0,1,2),(3,4,5),(6,7,8),
+    (0,3,6),(1,4,7),(2,5,8),
+    (0,4,8),(2,4,6)
+]
+
+CELL_EMOJI = {' ': 'B', 'X': 'X', 'O': 'O'}
+
+def ttt_check_winner(board):
+    for a, b, c in WIN_LINES:
+        if board[a] != ' ' and board[a] == board[b] == board[c]:
+            return board[a]
+    if ' ' not in board:
+        return 'draw'
+    return None
+
+def ttt_render_message(board):
+    rows = []
+    for r in range(3):
+        row = board[r*3:(r+1)*3]
+        rows.append(' '.join(CELL_EMOJI[c] for c in row))
+    return '<br/>'.join(rows)
+
+def ttt_escape(s):
+    return s.replace('\\', '\\\\').replace('"', '\\"')
+
+def ttt_build_alert_json(message, buttons):
+    btn_parts = []
+    for label, cmd in buttons:
+        if cmd is None:
+            btn_parts.append('{"label":"%s"}' % ttt_escape(label))
+        else:
+            btn_parts.append(
+                '{"label":"%s","onclick":"luna://org.webosbrew.hbchannel.service/exec","params":{"command":"%s"}}'
+                % (ttt_escape(label), ttt_escape(cmd))
+            )
+    buttons_json = ','.join(btn_parts)
+    payload = '{"sourceId":"com.webos.service.secondscreen.gateway","message":"%s","buttons":[%s]}' % (ttt_escape(message), buttons_json)
+    return payload
+
+def ttt_fire_alert(message, buttons):
+    payload = ttt_build_alert_json(message, buttons)
+    cmd = "luna-send -n 1 -a com.webos.service.secondscreen.gateway luna://com.webos.notification/createAlert '%s'" % payload.replace("'", "'\\''")
+    os.popen(cmd).read()
+
+def ttt_move_command(cell):
+    return "curl -s 'http://127.0.0.1:8080/ttt_move?cell=%d' -o /dev/null" % cell
+
+def ttt_show_board():
+    board = TICTACTOE_STATE['board']
+    turn = TICTACTOE_STATE['turn']
+    winner = ttt_check_winner(board)
+
+    if winner:
+        if winner == 'draw':
+            msg = ttt_render_message(board) + '<br/><br/>Draw!'
+        else:
+            msg = ttt_render_message(board) + '<br/><br/>%s wins!' % CELL_EMOJI[winner]
+        buttons = [('Play again', "curl -s 'http://127.0.0.1:8080/ttt_reset' -o /dev/null")]
+        ttt_fire_alert(msg, buttons)
+        return
+
+    msg = ttt_render_message(board) + ('<br/><br/>Turn: %s' % CELL_EMOJI[turn])
+    buttons = []
+    for i in range(9):
+        if board[i] == ' ':
+            buttons.append((str(i + 1), ttt_move_command(i)))
+    ttt_fire_alert(msg, buttons)
+
+def ttt_handle_start(conn):
+    TICTACTOE_STATE['board'] = [' '] * 9
+    TICTACTOE_STATE['turn'] = 'X'
+    ttt_show_board()
+    send_response(conn, '200 OK', 'started')
+
+def ttt_handle_move(conn, params):
+    cell_str = params.get('cell', '')
+    try:
+        cell = int(cell_str)
+    except ValueError:
+        send_response(conn, '400 Bad Request', 'bad cell')
+        return
+
+    board = TICTACTOE_STATE['board']
+    if cell < 0 or cell > 8 or board[cell] != ' ' or ttt_check_winner(board):
+        send_response(conn, '200 OK', 'ignored')
+        return
+
+    board[cell] = TICTACTOE_STATE['turn']
+    TICTACTOE_STATE['turn'] = 'O' if TICTACTOE_STATE['turn'] == 'X' else 'X'
+
+    ttt_show_board()
+    send_response(conn, '200 OK', 'ok')
+
+def ttt_handle_reset(conn):
+    TICTACTOE_STATE['board'] = [' '] * 9
+    TICTACTOE_STATE['turn'] = 'X'
+    ttt_show_board()
+    send_response(conn, '200 OK', 'reset')
+
+# ===== End Tic Tac Toe =====
+
 def guess_type(path):
     if path.endswith('.html'):
         return 'text/html'
@@ -176,6 +282,12 @@ def handle_connection(conn):
             handle_exec(conn, body)
         elif base_path == '/ls':
             handle_ls(conn, params.get('path', '/'))
+        elif base_path == '/ttt_start':
+            ttt_handle_start(conn)
+        elif base_path == '/ttt_move':
+            ttt_handle_move(conn, params)
+        elif base_path == '/ttt_reset':
+            ttt_handle_reset(conn)
         else:
             handle_static(conn, base_path)
 
